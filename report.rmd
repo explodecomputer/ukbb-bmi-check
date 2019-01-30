@@ -1,0 +1,81 @@
+---
+title: Check UKBB BMI GWAS
+author: Gibran Hemani and Ben Elsworth
+---
+
+```{r}
+suppressWarnings(suppressPackageStartupMessages({
+	library(knitr)
+	library(dplyr)
+	library(data.table)
+	library(magrittr)
+	library(tidyr)
+	library(TwoSampleMR)
+	library(qqman)
+}))
+opts_chunk$set(cache=TRUE, echo=TRUE, message=FALSE, warning=FALSE)	
+
+a <- fread("gunzip -c data/data.batch_23104.txt.gz", he=TRUE)
+```
+
+Which p-value to use?
+
+```{r}
+cor(select(a, P_LINREG, P_BOLT_LMM_INF, P_BOLT_LMM))
+
+sigcount <- select(a, SNP, P_LINREG, P_BOLT_LMM_INF, P_BOLT_LMM) %>% gather(key="key", value="value", P_LINREG, P_BOLT_LMM_INF, P_BOLT_LMM) %>% group_by(key) %>% summarise(nsig = sum(value < 1e-8))
+kable(sigcount)
+```
+
+Clump
+
+```{r}
+write.table(data_frame(SNP=a$SNP, P=a$P_BOLT_LMM), file="clump.txt", row=F, col=T, qu=F)
+```
+
+```{r engine="bash"}
+plink --bfile ~/repo/mr-base-api/app/ld_files/data_maf0.01_rs --clump clump.txt --clump-r2 0.001 --clump-kb 10000 --clump-p1 5e-8 --clump-p2 5e-8 --out clump.txt 
+```
+
+```{r}
+b <- fread("clump.txt.clumped", he=T)
+b <- subset(a, SNP %in% b$SNP)
+```
+
+Check to see if they have similar effects with GIANT
+
+```{r}
+giant <- extract_outcome_data(b$SNP, 2, access_token=NULL)
+ed <- format_data(b, beta_col="BETA", se_col="SE", effect_allele_col="ALLELE1", other_allele_col="ALLELE0", pval_col="P_BOLT_LMM")
+dat <- harmonise_data(ed, giant)
+
+res <- mr(dat, method_list=c("mr_ivw"))
+kable(res)
+mr_scatter_plot(res, dat)
+kable(mr_heterogeneity(dat))
+```
+
+Check to see if GIANT instruments are consistent in UKBB
+
+```{r}
+giant_instruments <- extract_instruments(2)
+ukbb <- subset(a, SNP %in% giant_instruments$SNP) %>% format_data(., type="outcome", beta_col="BETA", se_col="SE", effect_allele_col="ALLELE1", other_allele_col="ALLELE0", pval_col="P_BOLT_LMM")
+dat2 <- harmonise_data(giant_instruments, ukbb)
+res <- mr(dat2, method_list="mr_ivw")
+kable(res)
+mr_scatter_plot(res, dat2)
+kable(mr_heterogeneity(dat2))
+```
+
+Genomic inflation
+
+```{r}
+median(qchisq(a$P_BOLT_LMM, 1, low=FALSE)) / qchisq(0.5, 1, low=FALSE)
+```
+
+Total variance explained by UKBB, using replication in GIANT, assuming its sample size is 250000
+
+```{r}
+get_r_from_pn(giant$pval.outcome, 250000)^2 %>% sum
+```
+
